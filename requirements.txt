@@ -1,0 +1,21 @@
+# BlueberryMCAgent – Python dependencies
+#
+# Install all at once (CPU-only):
+#   pip install -r requirements.txt
+#
+# For Windows CUDA (RTX 30xx – CUDA 12.1):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+#
+# Check that CUDA is available after install:
+#   python -c "import torch; print(torch.cuda.is_available())"
+
+flask>=3.0,<4.0
+requests>=2.31,<3.0
+Pillow>=10.0,<12.0
+numpy>=1.26,<2.0
+
+# PyTorch – install separately with the CUDA wheel (see above).
+# The line below installs the CPU-only build when no CUDA index is given.
+torch>=2.2,<3.0
+torchvision>=0.17,<1.0

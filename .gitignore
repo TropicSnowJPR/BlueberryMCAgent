@@ -1,0 +1,34 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Training runs (large data, not committed)
+runs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# PyTorch checkpoints (can be very large)
+*.pt
+*.pth
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+*.jsonl
