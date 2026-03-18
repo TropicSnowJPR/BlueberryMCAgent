@@ -77,6 +77,24 @@ class RolloutBuffer:
         self._ptr = 0
         self._full = False
 
+    def clone(self) -> "RolloutBuffer":
+        """Return a deep copy of the filled buffer for lock-free PPO updates."""
+        buf = RolloutBuffer.__new__(RolloutBuffer)
+        buf.capacity = self.capacity
+        buf.gamma = self.gamma
+        buf.gae_lambda = self.gae_lambda
+        buf.device = self.device
+        buf.imgs      = self.imgs.copy()
+        buf.states    = self.states.copy()
+        buf.actions   = self.actions.copy()
+        buf.rewards   = self.rewards.copy()
+        buf.values    = self.values.copy()
+        buf.log_probs = self.log_probs.copy()
+        buf.dones     = self.dones.copy()
+        buf._ptr  = self._ptr
+        buf._full = self._full
+        return buf
+
     # ── Compute returns / advantages ───────────────────────────────────────────
 
     def compute_gae(self, last_value: float) -> tuple[np.ndarray, np.ndarray]:
@@ -94,8 +112,12 @@ class RolloutBuffer:
         advantages = np.zeros(self.capacity, dtype=np.float32)
         last_gae = 0.0
         for t in reversed(range(self.capacity)):
+            # Use current step's done flag: if the episode ended at step t
+            # the next state has no value (non-terminal = 0).
+            next_non_terminal = 1.0 - self.dones[t]
+            # Bootstrap from last_value for the final step, otherwise from
+            # the stored value of the very next step.
             next_val = last_value if t == self.capacity - 1 else self.values[t + 1]
-            next_non_terminal = 1.0 - (self.dones[t + 1] if t < self.capacity - 1 else 1.0)
             delta = (
                 self.rewards[t]
                 + self.gamma * next_val * next_non_terminal

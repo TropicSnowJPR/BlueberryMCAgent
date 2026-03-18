@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import queue
 import threading
 import time
 from datetime import datetime
@@ -29,7 +29,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from trainer.config import (
     CHECKPOINT_EVERY_N_UPDATES,
+    GAMMA,
+    GAE_LAMBDA,
     HOST,
+    IMG_H,
+    IMG_W,
+    LR,
     PORT,
     ROLLOUT_STEPS,
     SEED,
@@ -63,15 +68,17 @@ set_seed(SEED)
 DEVICE = get_device()
 log.info("Using device: %s", DEVICE)
 
-model = ActorCritic().to(DEVICE)
-optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+IMG_SHAPE = (3, IMG_H, IMG_W)  # C, H, W – sourced from config
 
-IMG_SHAPE = (3, 90, 160)   # C, H, W  (matches config.IMG_H / IMG_W)
+model = ActorCritic().to(DEVICE)
+optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
 buffer = RolloutBuffer(
     capacity=ROLLOUT_STEPS,
     img_shape=IMG_SHAPE,
     state_dim=ActorCritic.STATE_DIM,
+    gamma=GAMMA,
+    gae_lambda=GAE_LAMBDA,
     device=DEVICE,
 )
 
@@ -93,51 +100,72 @@ _state = {
     "last_stats": {},
 }
 
+# ── Screenshot writer (bounded queue + single daemon thread) ──────────────────
+_screenshot_queue: queue.Queue = queue.Queue(maxsize=32)
+
+
+def _screenshot_writer():
+    """Drain the screenshot queue and save PNGs to disk sequentially."""
+    while True:
+        item = _screenshot_queue.get()
+        if item is None:
+            break
+        b64, path = item
+        save_screenshot(b64, path)
+        _screenshot_queue.task_done()
+
+
+_screenshot_thread = threading.Thread(target=_screenshot_writer, daemon=True)
+_screenshot_thread.start()
+
 # ── Background training thread ────────────────────────────────────────────────
 _train_event = threading.Event()
 
 
 def _training_worker():
-    """Wait for the buffer to fill, then run a PPO update."""
+    """Wait for the buffer to fill, snapshot it, then run PPO without holding _lock."""
     while True:
         _train_event.wait()
         _train_event.clear()
+
+        # ── Phase 1: snapshot buffer + last state under lock, then release ─────
         with _lock:
             if not buffer.full:
                 continue
-            # Bootstrap value for the last state
+            buf_snap = buffer.clone()
+            buffer.reset()  # immediately free buffer so /step can continue writing
             with torch.no_grad():
-                img_t = torch.tensor(
-                    _state["prev_img"][None], device=DEVICE
-                )
-                st_t = torch.tensor(
-                    _state["prev_state_vec"][None], device=DEVICE
-                )
+                img_t = torch.tensor(_state["prev_img"][None], device=DEVICE)
+                st_t = torch.tensor(_state["prev_state_vec"][None], device=DEVICE)
                 _, last_val = model(img_t, st_t)
             last_value = float(last_val.item())
-            stats = ppo_update(model, optimizer, buffer, last_value)
-            buffer.reset()
+
+        # ── Phase 2: PPO update – no lock held here ────────────────────────────
+        stats = ppo_update(model, optimizer, buf_snap, last_value)
+
+        # ── Phase 3: publish stats under lock ─────────────────────────────────
+        with _lock:
             _state["total_updates"] += 1
             _state["last_stats"] = stats
-
             n = _state["total_updates"]
-            log.info(
-                "PPO update #%d | pl=%.4f vl=%.4f ent=%.4f",
-                n, stats.get("policy_loss", 0), stats.get("value_loss", 0),
-                stats.get("entropy", 0),
-            )
 
-            if n % CHECKPOINT_EVERY_N_UPDATES == 0:
-                ckpt_path = CKPT_DIR / f"ckpt_{n:06d}.pt"
-                torch.save(
-                    {
-                        "update": n,
-                        "model_state": model.state_dict(),
-                        "optimizer_state": optimizer.state_dict(),
-                    },
-                    ckpt_path,
-                )
-                log.info("Checkpoint saved → %s", ckpt_path)
+        log.info(
+            "PPO update #%d | pl=%.4f vl=%.4f ent=%.4f",
+            n, stats.get("policy_loss", 0), stats.get("value_loss", 0),
+            stats.get("entropy", 0),
+        )
+
+        if n % CHECKPOINT_EVERY_N_UPDATES == 0:
+            ckpt_path = CKPT_DIR / f"ckpt_{n:06d}.pt"
+            torch.save(
+                {
+                    "update": n,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                },
+                ckpt_path,
+            )
+            log.info("Checkpoint saved → %s", ckpt_path)
 
 
 _train_thread = threading.Thread(target=_training_worker, daemon=True)
@@ -160,13 +188,14 @@ def step():
         img = decode_screenshot(b64)
         state_vec = obs_to_state_vector(obs)
 
-        # ── Save screenshot to disk ────────────────────────────────────────────
+        # ── Queue screenshot for async disk write ──────────────────────────────
         if b64:
             step_n = _state["total_steps"]
             screen_path = SCREENS_DIR / f"step_{step_n:08d}.png"
-            threading.Thread(
-                target=save_screenshot, args=(b64, str(screen_path)), daemon=True
-            ).start()
+            try:
+                _screenshot_queue.put_nowait((b64, str(screen_path)))
+            except queue.Full:
+                pass  # drop frame under backpressure rather than accumulating threads
 
         # ── Select action ──────────────────────────────────────────────────────
         img_t = torch.tensor(img[None], device=DEVICE)
@@ -176,6 +205,7 @@ def step():
         # ── Compute reward from previous → current obs transition ─────────────
         prev_obs = _state["prev_obs"]
         reward = 0.0
+        done = obs.get("health", 20.0) <= 0.0  # bool; True on death (terminal)
         if prev_obs is not None:
             reward, _state["milestones"] = compute_reward(
                 prev_obs, obs, _state["milestones"]
@@ -184,8 +214,8 @@ def step():
         _state["episode_reward"] += reward
         _state["total_reward"] += reward
 
-        # ── Store transition to rollout buffer ─────────────────────────────────
-        if prev_obs is not None:
+        # ── Store transition (guard against overflow while buffer full) ────────
+        if prev_obs is not None and not buffer.full:
             buffer.add(
                 img=_state["prev_img"],
                 state=_state["prev_state_vec"],
@@ -193,31 +223,44 @@ def step():
                 reward=reward,
                 value=_state["prev_value"],
                 log_prob=_state["prev_log_prob"],
-                done=False,
+                done=done,
             )
             if buffer.full:
                 _train_event.set()
 
-        # ── Log transition to JSONL ────────────────────────────────────────────
-        record = {
-            "step": _state["total_steps"],
-            "t": time.time(),
-            "action": action,
-            "reward": reward,
-            "obs": {
-                "pos": obs.get("pos"),
-                "yaw": obs.get("yaw"),
-                "pitch": obs.get("pitch"),
-                "health": obs.get("health"),
-                "inventory": obs.get("inventory"),
-                "targeted_block": obs.get("targeted_block"),
-            },
-        }
-        try:
-            with open(STEPS_LOG, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
-        except OSError:
-            pass
+        # ── Reset episode on terminal (death) ──────────────────────────────────
+        if done:
+            log.info(
+                "Episode ended (death) | episode_reward=%.3f", _state["episode_reward"]
+            )
+            _state["episode_reward"] = 0.0
+            _state["milestones"] = {}
+
+        # ── Log transition to JSONL (only after first obs, when we have a real prev_action) ──
+        # prev_action is the action that was executed and produced `reward`.
+        # next_action (= action) is what we are returning for the next step.
+        if prev_obs is not None:
+            record = {
+                "step": _state["total_steps"],
+                "t": time.time(),
+                "action": _state["prev_action"],   # action that caused this reward
+                "next_action": action,              # action being returned for next step
+                "reward": reward,
+                "done": done,
+                "obs": {
+                    "pos": obs.get("pos"),
+                    "yaw": obs.get("yaw"),
+                    "pitch": obs.get("pitch"),
+                    "health": obs.get("health"),
+                    "inventory": obs.get("inventory"),
+                    "targeted_block": obs.get("targeted_block"),
+                },
+            }
+            try:
+                with open(STEPS_LOG, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+            except OSError:
+                pass
 
         # ── Advance state ──────────────────────────────────────────────────────
         _state["prev_obs"] = obs
