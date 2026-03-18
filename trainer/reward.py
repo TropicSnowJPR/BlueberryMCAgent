@@ -37,7 +37,7 @@ R_CRAFTING_TABLE_FIRST = 2.0
 R_PICKAXE_FIRST = 3.0
 R_COBBLESTONE_PER_ITEM = 0.3
 R_FOOD_PER_ITEM = 0.4
-R_LIVING_BONUS = 0.01        # small reward just for surviving each step
+R_LIVING_BONUS = 0.0001      # tiny reward just for surviving each step
 R_DAMAGE_PENALTY = -1.0      # per health point lost
 R_DEATH_PENALTY = -10.0
 
