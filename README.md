@@ -166,43 +166,15 @@ Open the MineScript console (default key: `\`) and run:
 The agent will start acting immediately.  
 Watch the trainer terminal for PPO update messages every 64 steps.
 
-### Step D — Open the live web view
+### Step D — Check training status
 
-Open a browser and navigate to:
-
-```
-http://127.0.0.1:25566/
-```
-
-You will see a live view of what the agent sees (updated each time a screenshot
-is captured), along with real-time stats: step count, current action (numeric ID
-and human-readable name), reward, wood log count, health, and PPO update count.
-
-Additional endpoints:
-
-| URL | Description |
-|---|---|
-| `http://127.0.0.1:25566/frame` | Latest JPEG frame (raw bytes) |
-| `http://127.0.0.1:25566/events` | SSE stream of JSON stats |
-| `http://127.0.0.1:25566/status` | Full JSON training summary |
-
-### Step E — Check training status (JSON API)
-
-In a browser or terminal:
+In a browser (or `curl`) visit:
 
 ```
 http://127.0.0.1:25566/status
 ```
 
-Or with curl:
-
-```bat
-curl http://127.0.0.1:25566/status
-```
-
-Returns a JSON object with `total_steps`, `total_updates`, `episode_reward`, `milestones`, and the latest PPO loss stats.
-
-### Step F — Stop the agent
+### Step E — Stop the agent
 
 In-game MineScript console:
 
@@ -243,7 +215,7 @@ All key presses are released at the end of every step.
 | First pickaxe | +3.0 (one time) |
 | Each new cobblestone | +0.3 |
 | Each new food item | +0.4 |
-| Surviving each step | +0.0001 |
+| Surviving each step | +0.01 |
 | Taking damage (per HP lost) | −1.0 |
 | Death | −10.0 |
 

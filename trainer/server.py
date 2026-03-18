@@ -5,16 +5,12 @@ Start from the project root:
 
 Endpoints
 ---------
-POST /step    – receive observation JSON, return action JSON
-GET  /        – browser live view (frame + SSE stats)
-GET  /frame   – latest agent frame as JPEG (auto-updated each step with screenshot)
-GET  /events  – Server-Sent Events stream of live JSON stats
-GET  /status  – human-readable JSON training summary
+POST /step   – receive observation JSON, return action JSON
+GET  /status – human-readable training summary
 """
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import queue
@@ -25,15 +21,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from flask import Flask, Response, jsonify, request, stream_with_context
-from PIL import Image
+from flask import Flask, jsonify, request
 
 # ── Path setup so `trainer.*` imports work when run as a script ───────────────
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from trainer.config import (
-    ACTION_NAMES,
     CHECKPOINT_EVERY_N_UPDATES,
     GAMMA,
     GAE_LAMBDA,
@@ -49,7 +43,7 @@ from trainer.config import (
 )
 from trainer.ppo import ActorCritic, RolloutBuffer, ppo_update
 from trainer.ppo.utils import decode_screenshot, obs_to_state_vector, save_screenshot
-from trainer.reward import compute_reward, WOOD_ITEMS
+from trainer.reward import compute_reward
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -106,10 +100,6 @@ _state = {
     "last_stats": {},
 }
 
-# ── Web view state (updated inside /step, read by /frame and /events) ─────────
-_view_frame: bytes | None = None   # latest JPEG frame bytes (or None before first screenshot)
-_view_stats: dict = {}             # latest stats snapshot for SSE / /events
-
 # ── Screenshot writer (bounded queue + single daemon thread) ──────────────────
 _screenshot_queue: queue.Queue = queue.Queue(maxsize=32)
 
@@ -127,74 +117,6 @@ def _screenshot_writer():
 
 _screenshot_thread = threading.Thread(target=_screenshot_writer, daemon=True)
 _screenshot_thread.start()
-
-# ── Web view helpers ──────────────────────────────────────────────────────────
-
-def _encode_frame_jpeg(img: np.ndarray) -> bytes:
-    """Convert a CHW float32 [0,1] array to JPEG bytes for /frame."""
-    hwc = (np.clip(img, 0.0, 1.0) * 255).astype(np.uint8).transpose(1, 2, 0)
-    pil_img = Image.fromarray(hwc, "RGB")
-    buf = io.BytesIO()
-    pil_img.save(buf, format="JPEG", quality=70)
-    return buf.getvalue()
-
-
-_HTML = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>BlueberryMCAgent Live View</title>
-<style>
-  body { background:#111; color:#eee; font-family:monospace; margin:1rem 2rem; }
-  h1 { color:#6cf; margin-bottom:.5rem; }
-  #frame-box img { border:2px solid #444; display:block; max-width:100%; }
-  #stats { margin-top:1rem; background:#1a1a1a; border:1px solid #333;
-           padding:.75rem 1rem; border-radius:4px; line-height:1.8; }
-  .label { color:#aaa; }
-  .val   { color:#fff; font-weight:bold; }
-  .good  { color:#6f6; }
-  .bad   { color:#f66; }
-</style>
-</head>
-<body>
-<h1>&#127758; BlueberryMCAgent – Live View</h1>
-<div id="frame-box">
-  <img id="live-frame" src="/frame" alt="agent view" width="640" height="360">
-</div>
-<div id="stats">Waiting for first step&hellip;</div>
-<script>
-// Refresh frame every second (append timestamp to bust cache)
-setInterval(function() {
-  var img = document.getElementById("live-frame");
-  img.src = "/frame?t=" + Date.now();
-}, 1000);
-
-// Live stats via Server-Sent Events
-var es = new EventSource("/events");
-es.onmessage = function(e) {
-  var d;
-  try { d = JSON.parse(e.data); } catch(x) { return; }
-  var r = parseFloat(d.reward || 0);
-  var rCls = r > 0 ? "good" : (r < 0 ? "bad" : "val");
-  document.getElementById("stats").innerHTML =
-    "<span class=label>Step:</span>         <span class=val>"  + (d.step || 0) + "</span>&emsp;" +
-    "<span class=label>PPO updates:</span>  <span class=val>"  + (d.ppo_updates || 0) + "</span><br>" +
-    "<span class=label>Action:</span>       <span class=val>"  + (d.action_id != null ? d.action_id : "–") +
-      " &ndash; " + (d.action_name || "–") + "</span><br>" +
-    "<span class=label>Reward:</span>       <span class="  + rCls + ">"  + (r.toFixed ? r.toFixed(4) : r) + "</span>&emsp;" +
-    "<span class=label>Episode reward:</span> <span class=val>" + ((d.episode_reward||0).toFixed ? (d.episode_reward||0).toFixed(3) : "–") + "</span><br>" +
-    "<span class=label>Health:</span>       <span class=val>"  + (d.health || "–") + " / 20</span>&emsp;" +
-    "<span class=label>Wood (logs):</span>  <span class=val>"  + (d.wood_count != null ? d.wood_count : "–") + "</span><br>" +
-    "<span class=label>Run ID:</span>       <span class=val>"  + (d.run_id || "–") + "</span>";
-};
-es.onerror = function() {
-  document.getElementById("stats").innerHTML += "<br><span class=bad>[SSE disconnected – reconnecting&hellip;]</span>";
-};
-</script>
-</body>
-</html>
-"""
 
 # ── Background training thread ────────────────────────────────────────────────
 _train_event = threading.Event()
@@ -292,29 +214,6 @@ def step():
         _state["episode_reward"] += reward
         _state["total_reward"] += reward
 
-        # ── Update web view (frame + stats) only when screenshot is present ────
-        global _view_frame, _view_stats
-        if b64:
-            inv = obs.get("inventory", {})
-            wood_count = sum(inv.get(item, 0) for item in WOOD_ITEMS)
-            if 0 <= action < len(ACTION_NAMES):
-                action_name = ACTION_NAMES[action]
-            else:
-                log.warning("Unexpected action index %d outside ACTION_NAMES range", action)
-                action_name = str(action)
-            _view_frame = _encode_frame_jpeg(img)
-            _view_stats = {
-                "run_id": RUN_ID,
-                "step": _state["total_steps"],
-                "ppo_updates": _state["total_updates"],
-                "action_id": action,
-                "action_name": action_name,
-                "reward": round(reward, 6),
-                "episode_reward": round(_state["episode_reward"], 4),
-                "health": obs.get("health", 20.0),
-                "wood_count": wood_count,
-            }
-
         # ── Store transition (guard against overflow while buffer full) ────────
         if prev_obs is not None and not buffer.full:
             buffer.add(
@@ -373,50 +272,6 @@ def step():
         _state["total_steps"] += 1
 
     return jsonify({"action": action})
-
-
-@app.get("/")
-def index():
-    """Browser live view: shows the latest agent frame and live stats."""
-    return Response(_HTML, mimetype="text/html")
-
-
-@app.get("/frame")
-def frame():
-    """Return the latest agent frame as a JPEG image, or 204 if none yet."""
-    with _lock:
-        fb = _view_frame
-    if fb is None:
-        return Response(status=204)
-    return Response(
-        fb,
-        mimetype="image/jpeg",
-        headers={"Cache-Control": "no-cache, no-store"},
-    )
-
-
-@app.get("/events")
-def events():
-    """Server-Sent Events stream of live JSON stats (one event per second)."""
-    @stream_with_context
-    def generate():
-        try:
-            while True:
-                with _lock:
-                    snap = dict(_view_stats)
-                yield f"data: {json.dumps(snap)}\n\n"
-                time.sleep(1.0)
-        except GeneratorExit:
-            pass  # client disconnected – clean shutdown
-
-    return Response(
-        generate(),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 @app.get("/status")
