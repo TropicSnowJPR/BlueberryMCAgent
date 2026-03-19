@@ -355,8 +355,11 @@ Run `tools/input_logger.py` in a separate terminal while recording, then use
 `trainer/demo_align.py` to merge the logs.  See **Mode A, Step A1** above.
 
 ### Want to resume online PPO training from a checkpoint?
-Checkpoints are saved to `runs/<id>/checkpoints/ckpt_<N>.pt` every 50 updates.
-Load one with:
+Online PPO checkpoints are saved to `runs/<id>/checkpoints/ckpt_<N>.pt` every
+50 updates.  BC (behaviour-cloning) checkpoints are saved to
+`checkpoints/bc_<timestamp>.pt` and `checkpoints/bc_latest.pt`.
+
+Load an online PPO checkpoint manually:
 
 ```python
 import torch
@@ -366,5 +369,8 @@ ckpt = torch.load("runs/20240415_100000/checkpoints/ckpt_000050.pt")
 model.load_state_dict(ckpt["model_state"])
 ```
 
-Or pass it as `--init_from` to the server to warm-start online PPO.
+Or pass any checkpoint (PPO or BC) to the server via `--init_from`:
+```bat
+python trainer/server.py --init_from checkpoints/bc_latest.pt
+```
 

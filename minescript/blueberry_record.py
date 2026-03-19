@@ -321,7 +321,6 @@ def main():
         if b64:
             screenshot_path = str(screens_dir / f"step_{step:08d}.png")
             try:
-                import struct
                 raw = base64.b64decode(b64)
                 with open(screenshot_path, "wb") as f:
                     f.write(raw)
