@@ -19,3 +19,6 @@ numpy>=1.26,<2.0
 # The line below installs the CPU-only build when no CUDA index is given.
 torch>=2.2,<3.0
 torchvision>=0.17,<1.0
+
+# Optional: used by tools/input_logger.py (Windows fallback input capture).
+pynput>=1.7,<2.0

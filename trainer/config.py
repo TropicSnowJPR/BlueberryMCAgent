@@ -21,7 +21,8 @@ ENTROPY_COEF = 0.01      # entropy bonus coefficient
 MAX_GRAD_NORM = 0.5      # gradient clipping
 
 # ── Action space ───────────────────────────────────────────────────────────────
-NUM_ACTIONS = 9          # must match blueberry_bridge.py
+# Must match trainer/actions.py NUM_ACTIONS and blueberry_bridge.py NUM_ACTIONS.
+NUM_ACTIONS = 14
 
 # ── Vision ─────────────────────────────────────────────────────────────────────
 IMG_W = 160              # width fed to the CNN (downscaled from full res)

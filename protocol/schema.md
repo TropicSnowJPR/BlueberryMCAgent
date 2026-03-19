@@ -107,19 +107,34 @@ Returns a human-readable JSON summary of the current training state.
 
 ## Discrete Action Space
 
-| Index | Name             | MineScript effect                                     |
-|-------|------------------|-------------------------------------------------------|
-| 0     | `noop`           | No key presses; agent stands still                    |
-| 1     | `forward`        | `player_press_forward(True)` for one step (0.25 s)    |
-| 2     | `turn_left`      | Decrease yaw by `YAW_DELTA` degrees (default 5°)     |
-| 3     | `turn_right`     | Increase yaw by `YAW_DELTA` degrees (default 5°)     |
-| 4     | `look_up`        | Decrease pitch by `PITCH_DELTA` degrees (default 4°) |
-| 5     | `look_down`      | Increase pitch by `PITCH_DELTA` degrees (default 4°) |
-| 6     | `attack`         | `player_press_attack(True)` for one step              |
-| 7     | `use`            | `player_press_use(True)` for one step                 |
-| 8     | `jump`           | `player_press_jump(True)` for one step                |
+| Index | Name                  | MineScript effect                                          | Hold     |
+|-------|-----------------------|------------------------------------------------------------|----------|
+| 0     | `noop`                | No key presses; agent stands still                         | —        |
+| 1     | `forward_250ms`       | `player_press_forward(True)` for 0.25 s                   | 0.25 s   |
+| 2     | `forward_1000ms`      | `player_press_forward(True)` for 1.0 s                    | 1.0 s    |
+| 3     | `forward_2000ms`      | `player_press_forward(True)` for 2.0 s                    | 2.0 s    |
+| 4     | `turn_left_small`     | Decrease yaw by `YAW_DELTA` degrees (default 5°)          | instant  |
+| 5     | `turn_right_small`    | Increase yaw by `YAW_DELTA` degrees (default 5°)          | instant  |
+| 6     | `look_up_small`       | Decrease pitch by `PITCH_DELTA` degrees (default 4°)      | instant  |
+| 7     | `look_down_small`     | Increase pitch by `PITCH_DELTA` degrees (default 4°)      | instant  |
+| 8     | `jump_250ms`          | `player_press_jump(True)` for 0.25 s                      | 0.25 s   |
+| 9     | `use_250ms`           | `player_press_use(True)` for 0.25 s                       | 0.25 s   |
+| 10    | `attack_250ms`        | `player_press_attack(True)` for 0.25 s                    | 0.25 s   |
+| 11    | `attack_hold_1000ms`  | `player_press_attack(True)` held for 1.0 s                | 1.0 s    |
+| 12    | `attack_hold_2000ms`  | `player_press_attack(True)` held for 2.0 s                | 2.0 s    |
+| 13    | `attack_hold_4000ms`  | `player_press_attack(True)` held for 4.0 s                | 4.0 s    |
 
-Keys are **always released** at the end of each step regardless of action.
+Keys are **released** after the specified hold duration.  For actions with a
+hold duration greater than `DT` (0.25 s) the bridge pauses observation
+collection for the full hold duration before taking the next step.
+
+### Hold rounding
+
+Continuous user input is discretised into hold buckets by **rounding up** to
+the nearest threshold:
+
+**Forward:** 2.0 s, 1.0 s, else 0.25 s  
+**Attack:** 4.0 s, 2.0 s, 1.0 s, else 0.25 s
 
 ---
 
