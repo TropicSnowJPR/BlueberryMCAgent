@@ -9,9 +9,18 @@ Every DT seconds the script:
   2. Optionally captures a screenshot (every SCREENSHOT_EVERY_N steps).
   3. POSTs an observation JSON (with optional base-64 PNG) to the trainer server.
   4. Receives a discrete action index and executes it.
-  5. Releases all keys at the end of each step (safety).
+  5. Holds keys for the action-specific duration, then releases them.
 
 If the trainer is unreachable the agent defaults to action 0 (noop) and keeps running.
+
+Action space (mirrors trainer/actions.py)
+-----------------------------------------
+0  noop            4  turn_left_small    8  jump_250ms
+1  forward_250ms   5  turn_right_small   9  use_250ms
+2  forward_1000ms  6  look_up_small     10  attack_250ms
+3  forward_2000ms  7  look_down_small   11  attack_hold_1000ms
+                                        12  attack_hold_2000ms
+                                        13  attack_hold_4000ms
 """
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -32,19 +41,57 @@ import urllib.error
 
 import minescript  # type: ignore – provided by the MineScript mod
 
-# ── Action index → human label ─────────────────────────────────────────────────
+# ── Action space (mirrored from trainer/actions.py) ────────────────────────────
+ACTION_NOOP         = 0
+ACTION_FORWARD_250  = 1
+ACTION_FORWARD_1000 = 2
+ACTION_FORWARD_2000 = 3
+ACTION_TURN_LEFT    = 4
+ACTION_TURN_RIGHT   = 5
+ACTION_LOOK_UP      = 6
+ACTION_LOOK_DOWN    = 7
+ACTION_JUMP_250     = 8
+ACTION_USE_250      = 9
+ACTION_ATTACK_250   = 10
+ACTION_ATTACK_1000  = 11
+ACTION_ATTACK_2000  = 12
+ACTION_ATTACK_4000  = 13
+NUM_ACTIONS         = 14
+
 ACTION_NAMES = [
-    "noop",            # 0
-    "forward",         # 1
-    "turn_left",       # 2
-    "turn_right",      # 3
-    "look_up",         # 4
-    "look_down",       # 5
-    "attack",          # 6
-    "use",             # 7
-    "jump",            # 8
+    "noop",               # 0
+    "forward_250ms",      # 1
+    "forward_1000ms",     # 2
+    "forward_2000ms",     # 3
+    "turn_left_small",    # 4
+    "turn_right_small",   # 5
+    "look_up_small",      # 6
+    "look_down_small",    # 7
+    "jump_250ms",         # 8
+    "use_250ms",          # 9
+    "attack_250ms",       # 10
+    "attack_hold_1000ms", # 11
+    "attack_hold_2000ms", # 12
+    "attack_hold_4000ms", # 13
 ]
-NUM_ACTIONS = len(ACTION_NAMES)
+
+# Hold duration (seconds) for each action.  0.0 = instant (no hold).
+_ACTION_HOLD_S = [
+    0.0,   # noop
+    0.25,  # forward_250ms
+    1.0,   # forward_1000ms
+    2.0,   # forward_2000ms
+    0.0,   # turn_left_small
+    0.0,   # turn_right_small
+    0.0,   # look_up_small
+    0.0,   # look_down_small
+    0.25,  # jump_250ms
+    0.25,  # use_250ms
+    0.25,  # attack_250ms
+    1.0,   # attack_hold_1000ms
+    2.0,   # attack_hold_2000ms
+    4.0,   # attack_hold_4000ms
+]
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -147,9 +194,11 @@ def _build_observation(step: int) -> dict:
     obs["inventory"] = _get_inventory()
     obs["targeted_block"] = _get_targeted_block()
 
-    # Screenshot (base-64 PNG), only every N steps
+    # Screenshot (base-64 PNG), only every N steps; omit key if capture failed
     if SCREENSHOT_EVERY_N > 0 and step % SCREENSHOT_EVERY_N == 0:
-        obs["screenshot_b64"] = _capture_screenshot_b64()
+        b64 = _capture_screenshot_b64()
+        if b64:
+            obs["screenshot_b64"] = b64
 
     return obs
 
@@ -175,30 +224,40 @@ def _post_step(obs: dict) -> int:
         return 0  # noop if unreachable
 
 
-def _execute_action(action: int, current_yaw: float, current_pitch: float):
-    """Execute a discrete action via MineScript controls."""
+def _execute_action(action: int, current_yaw: float, current_pitch: float) -> float:
+    """Execute a discrete action via MineScript controls.
+
+    Returns the desired hold duration in seconds for this action.  The main
+    loop will sleep for ``max(DT, hold_s)`` so that long holds block the
+    observation loop for their full duration before the next step.
+    """
     _release_all()
 
-    if action == 0:  # noop
+    hold_s = _ACTION_HOLD_S[action] if 0 <= action < NUM_ACTIONS else 0.0
+
+    if action == ACTION_NOOP:
         pass
-    elif action == 1:  # forward
+    elif action in (ACTION_FORWARD_250, ACTION_FORWARD_1000, ACTION_FORWARD_2000):
         minescript.player_press_forward(True)
-    elif action == 2:  # turn_left
+    elif action == ACTION_TURN_LEFT:
         minescript.player_set_orientation(current_yaw - YAW_DELTA, current_pitch)
-    elif action == 3:  # turn_right
+    elif action == ACTION_TURN_RIGHT:
         minescript.player_set_orientation(current_yaw + YAW_DELTA, current_pitch)
-    elif action == 4:  # look_up
+    elif action == ACTION_LOOK_UP:
         new_pitch = max(-89.0, current_pitch - PITCH_DELTA)
         minescript.player_set_orientation(current_yaw, new_pitch)
-    elif action == 5:  # look_down
+    elif action == ACTION_LOOK_DOWN:
         new_pitch = min(89.0, current_pitch + PITCH_DELTA)
         minescript.player_set_orientation(current_yaw, new_pitch)
-    elif action == 6:  # attack
-        minescript.player_press_attack(True)
-    elif action == 7:  # use
-        minescript.player_press_use(True)
-    elif action == 8:  # jump
+    elif action == ACTION_JUMP_250:
         minescript.player_press_jump(True)
+    elif action == ACTION_USE_250:
+        minescript.player_press_use(True)
+    elif action in (ACTION_ATTACK_250, ACTION_ATTACK_1000,
+                    ACTION_ATTACK_2000, ACTION_ATTACK_4000):
+        minescript.player_press_attack(True)
+
+    return hold_s
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -214,13 +273,16 @@ def main():
         action = _post_step(obs)
         yaw = obs.get("yaw", 0.0)
         pitch = obs.get("pitch", 0.0)
-        _execute_action(action, yaw, pitch)
+        hold_s = _execute_action(action, yaw, pitch)
 
-        # Hold keys for the remainder of DT, then release
+        # Hold keys for max(DT, hold_s) minus elapsed time, then release.
+        # Long-hold actions (e.g. attack_hold_4000ms) intentionally block the
+        # loop so the key stays pressed for the full hold duration.
         elapsed = time.time() - t_start
-        hold = max(0.0, DT - elapsed - 0.02)
-        if hold > 0:
-            time.sleep(hold)
+        target = max(DT, hold_s)
+        sleep_t = max(0.0, target - elapsed - 0.02)
+        if sleep_t > 0:
+            time.sleep(sleep_t)
         _release_all()
 
         step += 1

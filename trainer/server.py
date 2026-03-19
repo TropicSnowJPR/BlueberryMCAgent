@@ -3,6 +3,9 @@
 Start from the project root:
     python trainer/server.py
 
+    # Warm-start from a behaviour-cloning checkpoint:
+    python trainer/server.py --init_from checkpoints/bc_latest.pt
+
 Endpoints
 ---------
 POST /step   – receive observation JSON, return action JSON
@@ -11,6 +14,7 @@ GET  /status – human-readable training summary
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import queue
@@ -45,6 +49,20 @@ from trainer.ppo import ActorCritic, RolloutBuffer, ppo_update
 from trainer.ppo.utils import decode_screenshot, obs_to_state_vector, save_screenshot
 from trainer.reward import compute_reward
 
+# ── CLI arguments ─────────────────────────────────────────────────────────────
+_parser = argparse.ArgumentParser(description="BlueberryMCAgent online PPO trainer")
+_parser.add_argument(
+    "--init_from",
+    metavar="CHECKPOINT",
+    default=None,
+    help=(
+        "Optional path to a checkpoint (.pt) to warm-start the policy network "
+        "from.  Typically a behaviour-cloning checkpoint produced by "
+        "trainer/bc_train.py (e.g. checkpoints/bc_latest.pt)."
+    ),
+)
+_args, _unknown = _parser.parse_known_args()
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +90,17 @@ IMG_SHAPE = (3, IMG_H, IMG_W)  # C, H, W – sourced from config
 
 model = ActorCritic().to(DEVICE)
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+
+# ── Optional warm-start from a checkpoint ────────────────────────────────────
+if _args.init_from:
+    _ckpt_path = Path(_args.init_from)
+    if not _ckpt_path.exists():
+        log.warning("--init_from path not found: %s (starting from scratch)", _ckpt_path)
+    else:
+        _ckpt = torch.load(_ckpt_path, map_location=DEVICE)
+        _state_dict = _ckpt.get("model_state", _ckpt)
+        model.load_state_dict(_state_dict, strict=False)
+        log.info("Warm-started policy from checkpoint: %s", _ckpt_path.resolve())
 
 buffer = RolloutBuffer(
     capacity=ROLLOUT_STEPS,
